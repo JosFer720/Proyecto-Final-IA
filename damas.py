@@ -205,3 +205,227 @@ class GameEngine:
         if not self.getlegalmoves(state):
             return opponent(state.turn)
         return None
+
+    def alphabeta(
+        self,
+        depth: int,
+        alpha: float = -INF,
+        beta: float = INF,
+        state: GameState | None = None,
+    ) -> tuple[float, Move | None]:
+        agent = AlphaBetaAgent(depth=depth)
+        state = state or self.state
+        move = agent.choose_move(self, state, time_limit=2.0)
+        return agent.last_metrics.evaluation, move
+
+    def alpha_beta(
+        self,
+        depth: int,
+        alpha: float = -INF,
+        beta: float = INF,
+        state: GameState | None = None,
+    ) -> tuple[float, Move | None]:
+        return self.alphabeta(depth, alpha, beta, state)
+
+    def expectimax(self, depth: int, state: GameState | None = None) -> tuple[float, Move | None]:
+        # The project only requires the methods considered convenient.
+        # This light version models the opponent as choosing uniformly.
+        state = state or self.state
+        root_player = state.turn
+        best_value = -INF
+        best_move = None
+        for move in self.getlegalmoves(state):
+            value = self._expectimax_value(
+                self._apply_move_unchecked(state, move),
+                depth - 1,
+                root_player,
+            )
+            if value > best_value:
+                best_value = value
+                best_move = move
+        return best_value, best_move
+
+    def mcts(self, iterations: int = 500, C: float = 1.414, state: GameState | None = None) -> Move | None:
+        agent = MCTSAgent(iterations=iterations, exploration=C)
+        return agent.choose_move(self, state or self.state, time_limit=None)
+
+    def _simple_moves_for_piece(self, state: GameState, index: int) -> list[Move]:
+        piece = state.board[index]
+        moves: list[Move] = []
+        row, col = index_to_rc(index)
+        for dr, dc in directions_for_piece(piece):
+            end = rc_to_index(row + dr, col + dc)
+            if end is not None and state.board[end] == EMPTY:
+                promoted_piece = promote_if_needed(piece, end)
+                moves.append(Move(path=(index, end), promotes=promoted_piece != piece))
+        return moves
+
+    def _capture_moves_for_piece(self, state: GameState, index: int) -> list[Move]:
+        piece = state.board[index]
+        results: list[Move] = []
+        self._extend_capture(
+            board=state.board,
+            current=index,
+            piece=piece,
+            path=(index,),
+            captures=(),
+            promoted=False,
+            results=results,
+        )
+        return results
+
+    def _extend_capture(
+        self,
+        board: tuple[int, ...],
+        current: int,
+        piece: int,
+        path: tuple[int, ...],
+        captures: tuple[int, ...],
+        promoted: bool,
+        results: list[Move],
+    ) -> None:
+        found = False
+        row, col = index_to_rc(current)
+        for dr, dc in directions_for_piece(piece):
+            middle = rc_to_index(row + dr, col + dc)
+            landing = rc_to_index(row + 2 * dr, col + 2 * dc)
+            if middle is None or landing is None:
+                continue
+            if middle in captures:
+                continue
+            if piece_owner(board[middle]) != opponent(piece_owner(piece)) or board[landing] != EMPTY:
+                continue
+
+            found = True
+            new_board = list(board)
+            new_board[current] = EMPTY
+            new_board[middle] = EMPTY
+            new_piece = promote_if_needed(piece, landing)
+            new_board[landing] = new_piece
+            did_promote = promoted or new_piece != piece
+            new_path = path + (landing,)
+            new_captures = captures + (middle,)
+
+            # Decision del proyecto: si un peon corona al capturar, termina el turno.
+            if new_piece != piece and not is_king(piece):
+                results.append(Move(new_path, new_captures, promotes=True))
+            else:
+                self._extend_capture(
+                    tuple(new_board),
+                    landing,
+                    new_piece,
+                    new_path,
+                    new_captures,
+                    did_promote,
+                    results,
+                )
+
+        if captures and not found:
+            results.append(Move(path, captures, promotes=promoted))
+
+    def _apply_move_unchecked(self, state: GameState, move: Move) -> GameState:
+        board = list(state.board)
+        piece = board[move.start]
+        board[move.start] = EMPTY
+        for captured in move.captures:
+            board[captured] = EMPTY
+        board[move.end] = promote_if_needed(piece, move.end)
+        no_capture_ply = 0 if move.captures else state.no_capture_ply + 1
+        return GameState(tuple(board), opponent(state.turn), state.ply + 1, no_capture_ply)
+
+    def _expectimax_value(self, state: GameState, depth: int, root_player: int) -> float:
+        winner = self.get_winner(state)
+        if depth <= 0 or winner is not None:
+            return evaluate_state(state, root_player, self)
+        moves = self.getlegalmoves(state)
+        if not moves:
+            return evaluate_state(state, root_player, self)
+        if state.turn == root_player:
+            return max(
+                self._expectimax_value(self._apply_move_unchecked(state, move), depth - 1, root_player)
+                for move in moves
+            )
+        return sum(
+            self._expectimax_value(self._apply_move_unchecked(state, move), depth - 1, root_player)
+            for move in moves
+        ) / len(moves)
+
+
+def evaluate_state(state: GameState, player: int, engine: GameEngine | None = None) -> float:
+    engine = engine or GameEngine(state)
+    winner = engine.get_winner(state)
+    if winner == player:
+        return 100000.0
+    if winner == opponent(player):
+        return -100000.0
+    if winner == DRAW:
+        return 0.0
+
+    score = 0.0
+    for index, piece in enumerate(state.board):
+        owner = piece_owner(piece)
+        if owner is None:
+            continue
+        sign = 1 if owner == player else -1
+        row, col = index_to_rc(index)
+        if abs(piece) == WHITE_MAN:
+            score += sign * 100
+            advancement = (7 - row) if owner == WHITE else row
+            score += sign * advancement * 5
+        else:
+            score += sign * 175
+        if 2 <= row <= 5 and 2 <= col <= 5:
+            score += sign * 6
+        if col in (0, 7):
+            score += sign * 8
+
+    own_moves = len(engine.getlegalmoves(GameState(state.board, player, state.ply, state.no_capture_ply)))
+    rival_moves = len(engine.getlegalmoves(GameState(state.board, opponent(player), state.ply, state.no_capture_ply)))
+    score += (own_moves - rival_moves) * 8
+    return score
+
+
+class RandomAgent:
+    name = "Random"
+
+    def __init__(self) -> None:
+        self.last_metrics = SearchMetrics()
+
+    def choose_move(self, engine: GameEngine, state: GameState, time_limit: float | None = None) -> Move | None:
+        start = time.perf_counter()
+        moves = engine.getlegalmoves(state)
+        move = random.choice(moves) if moves else None
+        self.last_metrics = SearchMetrics(nodes=1, elapsed_seconds=time.perf_counter() - start)
+        return move
+
+
+class MinimaxAgent:
+    name = "Minimax"
+
+    def __init__(self, depth: int = 3):
+        self.depth = depth
+        self.last_metrics = SearchMetrics()
+
+    def choose_move(self, engine: GameEngine, state: GameState, time_limit: float | None = None) -> Move | None:
+        start = time.perf_counter()
+        root_player = state.turn
+        self.last_metrics = SearchMetrics(depth_reached=self.depth)
+        best_value = -INF
+        best_move = None
+        for move in engine.getlegalmoves(state):
+            value = self._value(engine, engine._apply_move_unchecked(state, move), self.depth - 1, root_player)
+            if value > best_value:
+                best_value = value
+                best_move = move
+        self.last_metrics.elapsed_seconds = time.perf_counter() - start
+        self.last_metrics.evaluation = best_value if best_move else evaluate_state(state, root_player, engine)
+        return best_move
+
+    def _value(self, engine: GameEngine, state: GameState, depth: int, root_player: int) -> float:
+        self.last_metrics.nodes += 1
+        if depth <= 0 or engine.is_terminal(state):
+            return evaluate_state(state, root_player, engine)
+        moves = engine.getlegalmoves(state)
+        if state.turn == root_player:
+            return max(self._value(engine, engine._apply_move_unchecked(state, move), depth - 1, root_player) for move in moves)
+        return min(self._value(engine, engine._apply_move_unchecked(state, move), depth - 1, root_player) for move in moves)
