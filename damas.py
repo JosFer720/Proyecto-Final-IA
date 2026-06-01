@@ -429,3 +429,257 @@ class MinimaxAgent:
         if state.turn == root_player:
             return max(self._value(engine, engine._apply_move_unchecked(state, move), depth - 1, root_player) for move in moves)
         return min(self._value(engine, engine._apply_move_unchecked(state, move), depth - 1, root_player) for move in moves)
+
+
+class AlphaBetaAgent:
+    name = "Alpha-Beta"
+
+    def __init__(self, depth: int = 5):
+        self.depth = depth
+        self.last_metrics = SearchMetrics()
+        self._deadline: float | None = None
+        self._root_player = WHITE
+
+    def choose_move(self, engine: GameEngine, state: GameState, time_limit: float | None = 2.0) -> Move | None:
+        start = time.perf_counter()
+        self._deadline = start + time_limit if time_limit else None
+        self._root_player = state.turn
+        self.last_metrics = SearchMetrics(depth_reached=self.depth)
+        best_value = -INF
+        best_move = None
+        try:
+            for move in self._ordered_moves(engine, state):
+                value = self._value(
+                    engine,
+                    engine._apply_move_unchecked(state, move),
+                    self.depth - 1,
+                    -INF,
+                    INF,
+                )
+                if value > best_value:
+                    best_value = value
+                    best_move = move
+        except TimeoutError:
+            pass
+        self.last_metrics.elapsed_seconds = time.perf_counter() - start
+        self.last_metrics.evaluation = best_value if best_move else evaluate_state(state, state.turn, engine)
+        return best_move or (engine.getlegalmoves(state)[0] if engine.getlegalmoves(state) else None)
+
+    def _value(self, engine: GameEngine, state: GameState, depth: int, alpha: float, beta: float) -> float:
+        if self._deadline and time.perf_counter() >= self._deadline:
+            raise TimeoutError
+        self.last_metrics.nodes += 1
+        if depth <= 0 or engine.is_terminal(state):
+            return evaluate_state(state, self._root_player, engine)
+
+        moves = self._ordered_moves(engine, state)
+        if state.turn == self._root_player:
+            value = -INF
+            for move in moves:
+                value = max(value, self._value(engine, engine._apply_move_unchecked(state, move), depth - 1, alpha, beta))
+                alpha = max(alpha, value)
+                if alpha >= beta:
+                    break
+            return value
+
+        value = INF
+        for move in moves:
+            value = min(value, self._value(engine, engine._apply_move_unchecked(state, move), depth - 1, alpha, beta))
+            beta = min(beta, value)
+            if alpha >= beta:
+                break
+        return value
+
+    def _ordered_moves(self, engine: GameEngine, state: GameState) -> list[Move]:
+        moves = engine.getlegalmoves(state)
+        return sorted(
+            moves,
+            key=lambda move: (len(move.captures), move.promotes, evaluate_state(engine._apply_move_unchecked(state, move), state.turn, engine)),
+            reverse=True,
+        )
+
+
+@dataclass
+class MCTSNode:
+    state: GameState
+    parent: "MCTSNode | None" = None
+    move: Move | None = None
+    untried_moves: list[Move] = field(default_factory=list)
+    children: list["MCTSNode"] = field(default_factory=list)
+    visits: int = 0
+    wins: float = 0.0
+
+
+class MCTSAgent:
+    name = "MCTS"
+
+    def __init__(self, iterations: int = 1000, exploration: float = 1.414):
+        self.iterations = iterations
+        self.exploration = exploration
+        self.last_metrics = SearchMetrics()
+
+    def choose_move(self, engine: GameEngine, state: GameState, time_limit: float | None = 2.0) -> Move | None:
+        legal = engine.getlegalmoves(state)
+        if not legal:
+            return None
+        if len(legal) == 1:
+            return legal[0]
+
+        start = time.perf_counter()
+        deadline = start + time_limit if time_limit else None
+        root_player = state.turn
+        root = MCTSNode(state=state, untried_moves=legal[:])
+        simulations = 0
+
+        while simulations < self.iterations and (deadline is None or time.perf_counter() < deadline):
+            node = root
+            while not node.untried_moves and node.children:
+                node = self._best_uct_child(node)
+
+            if node.untried_moves:
+                move = random.choice(node.untried_moves)
+                node.untried_moves.remove(move)
+                child_state = engine._apply_move_unchecked(node.state, move)
+                child = MCTSNode(child_state, parent=node, move=move, untried_moves=engine.getlegalmoves(child_state))
+                node.children.append(child)
+                node = child
+
+            result = self._rollout(engine, node.state, root_player)
+            while node is not None:
+                node.visits += 1
+                node.wins += result
+                node = node.parent
+            simulations += 1
+
+        self.last_metrics = SearchMetrics(
+            elapsed_seconds=time.perf_counter() - start,
+            simulations=simulations,
+            nodes=sum(child.visits for child in root.children),
+        )
+        best_child = max(root.children, key=lambda child: child.visits)
+        return best_child.move
+
+    def _best_uct_child(self, node: MCTSNode) -> MCTSNode:
+        log_parent = math.log(max(1, node.visits))
+
+        def score(child: MCTSNode) -> float:
+            if child.visits == 0:
+                return INF
+            return (child.wins / child.visits) + self.exploration * math.sqrt(log_parent / child.visits)
+
+        return max(node.children, key=score)
+
+    def _rollout(self, engine: GameEngine, state: GameState, root_player: int) -> float:
+        current = state
+        for _ in range(80):
+            winner = engine.get_winner(current)
+            if winner is not None:
+                if winner == root_player:
+                    return 1.0
+                if winner == DRAW:
+                    return 0.5
+                return 0.0
+            moves = engine.getlegalmoves(current)
+            captures = [move for move in moves if move.captures]
+            current = engine._apply_move_unchecked(current, random.choice(captures or moves))
+        score = evaluate_state(current, root_player, engine)
+        if score > 0:
+            return 1.0
+        if score < 0:
+            return 0.0
+        return 0.5
+
+
+def run_game(max_plies: int = MAX_GAME_PLIES, white_agent=None, black_agent=None, time_limit: float = 2.0) -> dict[str, object]:
+    engine = GameEngine()
+    agents = {WHITE: white_agent, BLACK: black_agent}
+    metrics: dict[int, list[SearchMetrics]] = {WHITE: [], BLACK: []}
+
+    while not engine.is_terminal() and engine.state.ply < max_plies:
+        agent = agents[engine.state.turn]
+        if agent is None:
+            break
+        move = agent.choose_move(engine, engine.state, time_limit=time_limit)
+        if move is None:
+            break
+        engine.apply_move(move)
+        metrics[opponent(engine.state.turn)].append(agent.last_metrics)
+
+    winner = engine.get_winner()
+    if winner is None and engine.state.ply >= max_plies:
+        winner = DRAW
+    return {"winner": winner, "plies": engine.state.ply, "metrics": metrics}
+
+
+def benchmark_branching(max_depth: int = 5) -> Path:
+    engine = GameEngine()
+    rows: list[dict[str, object]] = []
+    for depth in range(1, max_depth + 1):
+        for agent in (MinimaxAgent(depth), AlphaBetaAgent(depth)):
+            move = agent.choose_move(engine, engine.state, time_limit=2.0)
+            nodes = max(1, agent.last_metrics.nodes)
+            rows.append(
+                {
+                    "algorithm": agent.name,
+                    "depth": depth,
+                    "nodes": nodes,
+                    "elapsed_seconds": round(agent.last_metrics.elapsed_seconds, 6),
+                    "effective_branching_factor": round(nodes ** (1 / depth), 4),
+                    "evaluation": round(agent.last_metrics.evaluation, 3),
+                    "best_move": move.label() if move else "",
+                }
+            )
+    return write_csv("branching.csv", rows)
+
+
+def run_tournament(games: int = 20, time_limit: float = 2.0, alpha_depth: int = 5) -> Path:
+    rows: list[dict[str, object]] = []
+    for game_number in range(1, games + 1):
+        alpha = AlphaBetaAgent(depth=alpha_depth)
+        mcts = MCTSAgent(iterations=100000)
+        if game_number % 2 == 1:
+            white_agent, black_agent = alpha, mcts
+        else:
+            white_agent, black_agent = mcts, alpha
+        result = run_game(white_agent=white_agent, black_agent=black_agent, time_limit=time_limit)
+        alpha_metrics = []
+        mcts_metrics = []
+        for side_metrics in result["metrics"].values():
+            for metric in side_metrics:
+                if metric.simulations:
+                    mcts_metrics.append(metric)
+                else:
+                    alpha_metrics.append(metric)
+        rows.append(
+            {
+                "game": game_number,
+                "white_agent": white_agent.name,
+                "black_agent": black_agent.name,
+                "winner": player_name(result["winner"]),
+                "plies": result["plies"],
+                "alpha_beta_avg_time": average([m.elapsed_seconds for m in alpha_metrics]),
+                "mcts_avg_time": average([m.elapsed_seconds for m in mcts_metrics]),
+                "alpha_beta_total_nodes": sum(m.nodes for m in alpha_metrics),
+                "mcts_total_simulations": sum(m.simulations for m in mcts_metrics),
+            }
+        )
+        print(f"Partida {game_number}: ganador={rows[-1]['winner']} plies={result['plies']}")
+    return write_csv("tournament.csv", rows)
+
+
+def average(values: list[float]) -> float:
+    return round(sum(values) / len(values), 6) if values else 0.0
+
+
+def write_csv(filename: str, rows: list[dict[str, object]]) -> Path:
+    output_dir = Path("resultados")
+    output_dir.mkdir(exist_ok=True)
+    path = output_dir / filename
+    if not rows:
+        return path
+    with path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"Archivo generado: {path}")
+    return path
