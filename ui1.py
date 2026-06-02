@@ -116,3 +116,154 @@ class AIWorker:
             self._move    = move
             self._metrics = agent.last_metrics
             self._ready   = True
+
+
+# Dibujo de piezas
+
+def draw_piece(surf, cx: int, cy: int, owner: int, king: bool) -> None:
+    import pygame
+    R = 30
+    if owner == WHITE:
+        shadow, rim, fill, mid = C["wp_shadow"], C["wp_rim"], C["wp_fill"], C["wp_mid"]
+        shine = (255, 255, 255)
+    else:
+        shadow, rim, fill, mid = C["bp_shadow"], C["bp_rim"], C["bp_fill"], C["bp_mid"]
+        shine = (105, 100, 92)
+    pygame.draw.circle(surf, shadow, (cx + 3, cy + 5), R)
+    pygame.draw.circle(surf, rim,    (cx,     cy    ), R)
+    pygame.draw.circle(surf, fill,   (cx,     cy    ), R - 3)
+    pygame.draw.circle(surf, mid,    (cx + 3, cy + 3), R - 5)
+    pygame.draw.circle(surf, fill,   (cx,     cy    ), R - 9)
+    pygame.draw.circle(surf, shine,  (cx - 10, cy - 11), 8)
+    pygame.draw.circle(surf, shine,  (cx -  7, cy -  8), 5)
+    if king:
+        _draw_crown(surf, cx, cy)
+
+
+def _draw_crown(surf, cx: int, cy: int) -> None:
+    import pygame
+    pts = [
+        (cx - 13, cy + 7), (cx - 13, cy - 4), (cx -  7, cy + 1),
+        (cx -  3, cy - 11), (cx,      cy - 3), (cx +  3, cy - 11),
+        (cx +  7, cy + 1),  (cx + 13, cy - 4), (cx + 13, cy + 7),
+    ]
+    pygame.draw.polygon(surf, C["crown"],    pts)
+    pygame.draw.polygon(surf, C["crown_hi"], pts, 1)
+    for gx, gy in [(cx - 3, cy - 11), (cx, cy - 3), (cx + 3, cy - 11)]:
+        pygame.draw.circle(surf, C["crown_gem"],  (gx, gy), 3)
+        pygame.draw.circle(surf, (255, 100, 100), (gx, gy), 2)
+
+
+def mini_piece(surf, cx: int, cy: int, owner: int, r: int = 8) -> None:
+    import pygame
+    fill = C["wp_fill"] if owner == WHITE else C["bp_fill"]
+    rim  = C["wp_rim"]  if owner == WHITE else C["bp_rim"]
+    pygame.draw.circle(surf, (8, 7, 6), (cx + 1, cy + 2), r)
+    pygame.draw.circle(surf, rim,       (cx, cy),          r)
+    pygame.draw.circle(surf, fill,      (cx, cy),          r - 2)
+    pygame.draw.circle(surf, (255, 255, 255), (cx - 3, cy - 3), 2)
+
+
+def alpha_surf(w: int, h: int):
+    import pygame
+    s = pygame.Surface((w, h), pygame.SRCALPHA)
+    s.fill((0, 0, 0, 0))
+    return s
+
+
+def blend(a, b, f: float):
+    return tuple(int(a[i] + (b[i] - a[i]) * f) for i in range(3))
+
+
+# GUI principal
+
+def run_gui() -> None:
+    try:
+        import pygame
+    except ImportError:
+        print("Pygame no esta instalado. Ejecuta: python -m pip install pygame")
+        return
+
+    pygame.init()
+    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+    pygame.display.set_caption("Damas IA — Proyecto Final 2026")
+    clock = pygame.time.Clock()
+
+    def mkfont(size: int, bold: bool = False):
+        for name in ("Segoe UI", "Arial"):
+            try:
+                return pygame.font.SysFont(name, size, bold=bold)
+            except Exception:
+                pass
+        return pygame.font.Font(None, size)
+
+    fnt_title   = mkfont(26, bold=True)
+    fnt_section = mkfont(12, bold=True)
+    fnt_body    = mkfont(15)
+    fnt_val     = mkfont(15, bold=True)
+    fnt_big     = mkfont(52, bold=True)
+    fnt_hint    = mkfont(20)
+
+    # Estado mutable
+    gs = {
+        "mode":      "Humano vs IA",
+        "diff":      "Media",
+        "autoplay":  False,
+        "selected":  None,
+        "sel_moves": [],
+        "last_move": None,
+        "metrics":   SearchMetrics(),
+        "thinking":  False,   # True si IA piensa
+    }
+
+    MODES = ["Humano vs Humano", "Humano vs IA", "IA vs IA"]
+    DIFFS = ["Facil", "Media", "Dificil"]
+    DEPTH = {"Facil": 2, "Media": 4, "Dificil": 5}
+
+    engine = GameEngine()
+    worker = AIWorker()
+
+    # Auxiliares
+
+    def is_human_turn() -> bool:
+        if gs["mode"] == "Humano vs Humano":
+            return True
+        if gs["mode"] == "Humano vs IA":
+            return engine.state.turn == WHITE
+        return False
+
+    def pick_agent():
+        """Devuelve agente según el turno."""
+        if engine.state.turn == BLACK:
+            return AlphaBetaAgent(depth=DEPTH[gs["diff"]])
+        # White in IA vs IA uses MCTS
+        return MCTSAgent(iterations=100_000)
+
+    def request_ai_move() -> None:
+        """Pide al worker un movimiento (no bloquea)."""
+        if worker.busy or engine.is_terminal():
+            return
+        gs["thinking"] = True
+        worker.start(pick_agent(), engine.state)
+
+    def apply_worker_result() -> None:
+        """Aplica resultado del worker si ya terminó."""
+        if not worker.ready:
+            return
+        move, metrics = worker.collect()
+        gs["thinking"] = False
+        if move and not engine.is_terminal():
+            gs["last_move"] = move
+            engine.apply_move(move)
+            gs["metrics"] = metrics
+        gs["selected"]  = None
+        gs["sel_moves"] = []
+
+    def restart() -> None:
+        engine.state    = GameState(create_initial_board(), WHITE)
+        gs["selected"]  = None
+        gs["sel_moves"] = []
+        gs["last_move"] = None
+        gs["metrics"]   = SearchMetrics()
+        gs["thinking"]  = False
+        # hilo daemon: se ignora resultado
