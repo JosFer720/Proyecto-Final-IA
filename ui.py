@@ -413,3 +413,111 @@ def run_gui() -> None:
         )
         screen.blit(footer, footer.get_rect(centerx=mid, bottom=SCREEN_H - 6))
         return rects
+
+    def _dot_row(x: int, y: int, count: int, total: int, owner: int) -> None:
+        fill  = C["wp_fill"] if owner == WHITE else C["bp_fill"]
+        rim   = C["wp_rim"]  if owner == WHITE else C["bp_rim"]
+        lc    = C["wp_rim"]  if owner == WHITE else C["muted"]
+        name  = "Blancas" if owner == WHITE else "Negras "
+        screen.blit(fnt_body.render(f"{name}: {count}", True, lc), (x, y - 14))
+        for i in range(total):
+            dx = x + i * 13 + 5
+            alive = i < count
+            pygame.draw.circle(screen, fill if alive else C["divider"], (dx, y), 5)
+            pygame.draw.circle(screen, rim  if alive else C["muted"],   (dx, y), 5, 1)
+
+    # Overlay fin de partida
+
+    def draw_gameover(winner: int) -> None:
+        ov = alpha_surf(BOARD_PX, SCREEN_H)
+        ov.fill((0, 0, 0, 170))
+        screen.blit(ov, (0, 0))
+        if winner == DRAW:
+            msg, col = "EMPATE", C["accent"]
+        elif winner == WHITE:
+            msg, col = "BLANCAS GANAN", (120, 230, 120)
+        else:
+            msg, col = "NEGRAS GANAN",  (230, 120, 120)
+        bx = BOARD_PX // 2
+        ts = fnt_big.render(msg, True, col)
+        hs = fnt_hint.render("Pulsa  Reiniciar  para una nueva partida", True, C["muted"])
+        screen.blit(ts, ts.get_rect(centerx=bx, centery=SCREEN_H // 2 - 36))
+        screen.blit(hs, hs.get_rect(centerx=bx, centery=SCREEN_H // 2 + 28))
+
+    # Bucle principal
+    btn_rects: dict[str, "pygame.Rect"] = {}
+    last_ai_tick = 0.0
+    running = True
+
+    while running:
+        t = time.perf_counter()
+        mouse = pygame.mouse.get_pos()
+
+        # Recoger resultado IA si listo
+        apply_worker_result()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                mx, my = event.pos
+
+                for label, rect in btn_rects.items():
+                    if rect.collidepoint(mx, my):
+                        if label == "Modo":
+                            gs["mode"] = MODES[(MODES.index(gs["mode"]) + 1) % len(MODES)]
+                        elif label == "Dificultad":
+                            gs["diff"] = DIFFS[(DIFFS.index(gs["diff"]) + 1) % len(DIFFS)]
+                        elif label == "Reiniciar":
+                            restart()
+
+                # Clicks en tablero
+                if mx < BOARD_PX and is_human_turn() and not engine.is_terminal() and not worker.busy:
+                    row, col = my // CELL, mx // CELL
+                    clicked  = rc_to_index(row, col)
+                    if clicked is not None:
+                        chosen = next((m for m in gs["sel_moves"] if m.end == clicked), None)
+                        if chosen:
+                            gs["last_move"] = chosen
+                            engine.apply_move(chosen)
+                            gs["selected"]  = None
+                            gs["sel_moves"] = []
+                        elif piece_owner(engine.state.board[clicked]) == engine.state.turn:
+                            gs["selected"]  = clicked
+                            gs["sel_moves"] = [m for m in engine.getlegalmoves()
+                                               if m.start == clicked]
+                        else:
+                            gs["selected"]  = None
+                            gs["sel_moves"] = []
+
+        # AI triggers
+
+        # Humano vs IA — AI plays automatically when it's Black's turn
+        if (gs["mode"] == "Humano vs IA"
+                and not is_human_turn()
+                and not engine.is_terminal()
+                and not worker.busy):
+            request_ai_move()
+
+        # IA vs IA — both sides move automatically
+        if (gs["mode"] == "IA vs IA"
+                and not engine.is_terminal()
+                and not worker.busy
+                and t - last_ai_tick > 0.3):
+            request_ai_move()
+            last_ai_tick = t
+
+        # Render
+        screen.fill(C["bg"])
+        draw_board(t)
+
+        winner = engine.get_winner()
+        if winner is not None:
+            draw_gameover(winner)
+
+        btn_rects = draw_panel(t, mouse)
+        pygame.display.flip()
+        clock.tick(60)
+
+    pygame.quit()
