@@ -683,3 +683,185 @@ def write_csv(filename: str, rows: list[dict[str, object]]) -> Path:
         writer.writerows(rows)
     print(f"Archivo generado: {path}")
     return path
+
+
+def make_plots() -> None:
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        make_svg_plots()
+        return
+
+    output_dir = Path("resultados")
+    branching_path = output_dir / "branching.csv"
+    tournament_path = output_dir / "tournament.csv"
+
+    if branching_path.exists():
+        by_algorithm: dict[str, list[tuple[int, int, float]]] = {}
+        with branching_path.open(encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                by_algorithm.setdefault(row["algorithm"], []).append(
+                    (int(row["depth"]), int(row["nodes"]), float(row["effective_branching_factor"]))
+                )
+        for algorithm, values in by_algorithm.items():
+            plt.plot([v[0] for v in values], [v[1] for v in values], marker="o", label=algorithm)
+        plt.xlabel("Profundidad")
+        plt.ylabel("Nodos visitados")
+        plt.title("Minimax vs Alpha-Beta")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(output_dir / "branching.png")
+        plt.close()
+
+    if tournament_path.exists():
+        counts: dict[str, int] = {}
+        with tournament_path.open(encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                counts[row["winner"]] = counts.get(row["winner"], 0) + 1
+        plt.bar(counts.keys(), counts.values())
+        plt.ylabel("Partidas")
+        plt.title("Resultados del torneo")
+        plt.tight_layout()
+        plt.savefig(output_dir / "tournament.png")
+        plt.close()
+    print(f"Graficas generadas en: {output_dir}")
+
+
+def make_svg_plots() -> None:
+    output_dir = Path("resultados")
+    branching_path = output_dir / "branching.csv"
+    tournament_path = output_dir / "tournament.csv"
+
+    if branching_path.exists():
+        rows = []
+        with branching_path.open(encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                rows.append((row["algorithm"], int(row["depth"]), int(row["nodes"])))
+        write_line_svg(output_dir / "branching.svg", rows, "Nodos visitados")
+
+    if tournament_path.exists():
+        counts: dict[str, int] = {}
+        with tournament_path.open(encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                counts[row["winner"]] = counts.get(row["winner"], 0) + 1
+        write_bar_svg(output_dir / "tournament.svg", counts, "Resultados del torneo")
+
+    print(f"Graficas SVG generadas en: {output_dir}")
+
+
+def write_line_svg(path: Path, rows: list[tuple[str, int, int]], title: str) -> None:
+    width, height = 760, 420
+    margin = 60
+    max_depth = max((depth for _, depth, _ in rows), default=1)
+    max_nodes = max((nodes for _, _, nodes in rows), default=1)
+    colors = {"Minimax": "#d97706", "Alpha-Beta": "#2563eb"}
+    grouped: dict[str, list[tuple[int, int]]] = {}
+    for algorithm, depth, nodes in rows:
+        grouped.setdefault(algorithm, []).append((depth, nodes))
+
+    def x_for(depth: int) -> float:
+        return margin + (depth - 1) * ((width - 2 * margin) / max(1, max_depth - 1))
+
+    def y_for(nodes: int) -> float:
+        return height - margin - nodes * ((height - 2 * margin) / max_nodes)
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{width / 2}" y="30" text-anchor="middle" font-family="Arial" font-size="22">{title}</text>',
+        f'<line x1="{margin}" y1="{height - margin}" x2="{width - margin}" y2="{height - margin}" stroke="#111"/>',
+        f'<line x1="{margin}" y1="{margin}" x2="{margin}" y2="{height - margin}" stroke="#111"/>',
+    ]
+    for algorithm, points in grouped.items():
+        points = sorted(points)
+        polyline = " ".join(f"{x_for(depth):.1f},{y_for(nodes):.1f}" for depth, nodes in points)
+        svg.append(f'<polyline points="{polyline}" fill="none" stroke="{colors.get(algorithm, "#111")}" stroke-width="3"/>')
+        for depth, nodes in points:
+            svg.append(f'<circle cx="{x_for(depth):.1f}" cy="{y_for(nodes):.1f}" r="5" fill="{colors.get(algorithm, "#111")}"/>')
+        svg.append(f'<text x="{width - margin - 140}" y="{70 + 24 * len(svg) % 80}" font-family="Arial" font-size="14" fill="{colors.get(algorithm, "#111")}">{algorithm}</text>')
+    path.write_text("\n".join(svg + ["</svg>"]), encoding="utf-8")
+
+
+def write_bar_svg(path: Path, counts: dict[str, int], title: str) -> None:
+    width, height = 760, 420
+    margin = 60
+    max_value = max(counts.values(), default=1)
+    bar_width = 110
+    gap = 45
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
+        '<rect width="100%" height="100%" fill="#ffffff"/>',
+        f'<text x="{width / 2}" y="30" text-anchor="middle" font-family="Arial" font-size="22">{title}</text>',
+    ]
+    for i, (label, value) in enumerate(counts.items()):
+        x = margin + i * (bar_width + gap)
+        bar_height = value * ((height - 2 * margin) / max_value)
+        y = height - margin - bar_height
+        svg.append(f'<rect x="{x}" y="{y:.1f}" width="{bar_width}" height="{bar_height:.1f}" fill="#2563eb"/>')
+        svg.append(f'<text x="{x + bar_width / 2}" y="{height - 30}" text-anchor="middle" font-family="Arial" font-size="14">{label}</text>')
+        svg.append(f'<text x="{x + bar_width / 2}" y="{y - 8:.1f}" text-anchor="middle" font-family="Arial" font-size="14">{value}</text>')
+    path.write_text("\n".join(svg + ["</svg>"]), encoding="utf-8")
+
+
+def run_self_tests() -> None:
+    assert len(create_initial_board()) == 32
+    assert count_pieces(create_initial_board(), WHITE) == 12
+    assert count_pieces(create_initial_board(), BLACK) == 12
+    assert rc_to_index(7, 7) is None
+    assert index_to_rc(rc_to_index(5, 0)) == (5, 0)
+
+    engine = GameEngine()
+    moves = engine.getlegalmoves()
+    assert moves
+    assert all(engine.state.board[move.start] > 0 for move in moves)
+
+    board = [EMPTY] * 32
+    board[21] = WHITE_MAN
+    board[17] = BLACK_MAN
+    capture_state = GameState(tuple(board), WHITE)
+    capture_moves = engine.getlegalmoves(capture_state)
+    assert capture_moves and all(move.captures for move in capture_moves)
+
+    board = [EMPTY] * 32
+    board[5] = WHITE_MAN
+    state = GameState(tuple(board), WHITE)
+    assert engine.get_winner(state) == WHITE
+
+    alpha = AlphaBetaAgent(depth=2)
+    assert alpha.choose_move(engine, engine.state, time_limit=0.5) in engine.getlegalmoves(engine.state)
+    mcts = MCTSAgent(iterations=20)
+    assert mcts.choose_move(engine, engine.state, time_limit=0.2) in engine.getlegalmoves(engine.state)
+    print("Pruebas internas OK")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Proyecto Damas IA")
+    parser.add_argument("--test", action="store_true", help="Ejecuta pruebas internas rapidas")
+    parser.add_argument("--benchmark", action="store_true", help="Genera resultados Minimax vs Alpha-Beta")
+    parser.add_argument("--tournament", action="store_true", help="Ejecuta torneo Alpha-Beta vs MCTS")
+    parser.add_argument("--plots", action="store_true", help="Genera graficas desde CSV")
+    parser.add_argument("--max-depth", type=int, default=5)
+    parser.add_argument("--games", type=int, default=20)
+    parser.add_argument("--time-limit", type=float, default=2.0)
+    parser.add_argument("--alpha-depth", type=int, default=5)
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.test:
+        run_self_tests()
+    elif args.benchmark:
+        benchmark_branching(args.max_depth)
+    elif args.tournament:
+        run_tournament(args.games, args.time_limit, args.alpha_depth)
+    elif args.plots:
+        make_plots()
+    else:
+        from ui import run_gui
+
+        run_gui()
+
+
+if __name__ == "__main__":
+    main()
