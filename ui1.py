@@ -267,3 +267,149 @@ def run_gui() -> None:
         gs["metrics"]   = SearchMetrics()
         gs["thinking"]  = False
         # hilo daemon: se ignora resultado
+
+    # Tablero
+
+    def draw_board(t: float) -> None:
+        hints   = {m.end: m for m in gs["sel_moves"]}
+        last_sq: set[int] = set()
+        if gs["last_move"]:
+            last_sq.add(gs["last_move"].start)
+            last_sq.add(gs["last_move"].end)
+
+        for row in range(8):
+            for col in range(8):
+                rect = pygame.Rect(col * CELL, row * CELL, CELL, CELL)
+                dark = is_playable_square(row, col)
+                idx  = rc_to_index(row, col)
+                base = C["sq_dark"] if dark else C["sq_light"]
+                if dark and idx in last_sq:
+                    base = blend(base, C["last_sq"], 0.45)
+                pygame.draw.rect(screen, base, rect)
+                if idx is None:
+                    continue
+                if idx == gs["selected"]:
+                    pulse = int(180 + 75 * math.sin(t * 5))
+                    pygame.draw.rect(screen, (255, 215, pulse), rect, 4)
+                if idx in hints:
+                    hc = C["hint_cap"] if hints[idx].captures else C["hint_mv"]
+                    hs = alpha_surf(CELL, CELL)
+                    pygame.draw.circle(hs, (*hc, 150), (CELL // 2, CELL // 2), 20)
+                    pygame.draw.circle(hs, (*hc, 220), (CELL // 2, CELL // 2), 20, 3)
+                    screen.blit(hs, rect.topleft)
+
+        for row in range(8):
+            for col in range(8):
+                idx = rc_to_index(row, col)
+                if idx is None:
+                    continue
+                piece = engine.state.board[idx]
+                if piece == EMPTY:
+                    continue
+                cx = col * CELL + CELL // 2
+                cy = row * CELL + CELL // 2
+                draw_piece(screen, cx, cy, piece_owner(piece), is_king(piece))
+
+    # Panel
+
+    def draw_card(x, y, w, h, title=None) -> None:
+        pygame.draw.rect(screen, C["card"], (x, y, w, h), border_radius=8)
+        if title:
+            ts = fnt_section.render(title, True, C["muted"])
+            screen.blit(ts, (x + 10, y + 8))
+
+    def draw_panel(t: float, mouse_pos) -> dict:
+        px  = BOARD_PX
+        cw  = PANEL_W - 28
+        cx_ = px + 14
+        mid = px + PANEL_W // 2
+
+        pygame.draw.rect(screen, C["panel"], (px, 0, PANEL_W, SCREEN_H))
+        pygame.draw.line(screen, C["divider"], (px, 0), (px, SCREEN_H), 2)
+
+        y = 16
+
+        # Título
+        ts = fnt_title.render("DAMAS  IA", True, C["accent"])
+        screen.blit(ts, ts.get_rect(centerx=mid, top=y));  y += 34
+        sub = fnt_section.render("PROYECTO FINAL — IA 2026", True, C["muted"])
+        screen.blit(sub, sub.get_rect(centerx=mid, top=y)); y += 22
+        pygame.draw.line(screen, C["divider"], (cx_, y), (cx_ + cw, y)); y += 10
+
+        # Carta 1 — Turno
+        draw_card(cx_, y, cw, 62, "ESTADO DEL JUEGO")
+        turn = engine.state.turn
+        br   = pygame.Rect(cx_ + 10, y + 26, cw - 20, 28)
+        pygame.draw.rect(screen, C["badge_w"] if turn == WHITE else C["badge_b"], br, border_radius=6)
+        mini_piece(screen, br.left + 16, br.centery, turn, r=8)
+        tn = fnt_val.render(f"Turno: {player_name(turn)}", True, C["text"])
+        screen.blit(tn, tn.get_rect(left=br.left + 30, centery=br.centery))
+        y += 72
+
+        # Carta 2 — Piezas
+        wc = count_pieces(engine.state.board, WHITE)
+        bc = count_pieces(engine.state.board, BLACK)
+        draw_card(cx_, y, cw, 82, "PIEZAS EN JUEGO")
+        _dot_row(cx_ + 10, y + 34, wc, 12, WHITE)
+        _dot_row(cx_ + 10, y + 62, bc, 12, BLACK)
+        y += 92
+
+        # Carta 3 — Métricas IA
+        met = gs["metrics"]
+        draw_card(cx_, y, cw, 108, "METRICAS IA")
+        rows = [
+            ("Nodos explorados", f"{met.nodes:,}"),
+            ("Simulaciones",     f"{met.simulations:,}"),
+            ("Tiempo jugada",    f"{met.elapsed_seconds:.3f} s"),
+            ("Valoracion",       f"{met.evaluation:+.1f}"),
+        ]
+        my = y + 26
+        for lbl, val in rows:
+            screen.blit(fnt_body.render(lbl, True, C["muted"]), (cx_ + 10, my))
+            vs = fnt_val.render(val, True, C["accent"])
+            screen.blit(vs, vs.get_rect(right=cx_ + cw - 10, top=my))
+            my += 20
+
+        # Indicador: IA pensando
+        if gs["thinking"]:
+            dots = "." * (int(t * 3) % 4)
+            tsurf = fnt_body.render(f"IA pensando{dots}", True, C["green"])
+            screen.blit(tsurf, tsurf.get_rect(centerx=mid, top=my + 2))
+        y += 118
+
+        # Ganador
+        winner = engine.get_winner()
+        if winner is not None:
+            wcolor = (110, 220, 110) if winner == WHITE else \
+                     (220, 110, 110) if winner == BLACK else C["accent"]
+            draw_card(cx_, y, cw, 40, None)
+            msg = "EMPATE" if winner == DRAW else f"GANA: {player_name(winner).upper()}"
+            screen.blit(fnt_val.render(msg, True, wcolor),
+                        fnt_val.render(msg, True, wcolor).get_rect(centerx=mid, centery=y + 20))
+
+        # Botones
+        btn_defs = [
+            ("Modo",       gs["mode"],  False),
+            ("Dificultad", gs["diff"],  False),
+            ("Reiniciar",  "",          False),
+        ]
+        rects: dict[str, pygame.Rect] = {}
+        by = BTN_START
+        for key, val, active in btn_defs:
+            r = pygame.Rect(cx_, by, cw, BTN_H)
+            rects[key] = r
+            hovered = r.collidepoint(mouse_pos)
+            bg = C["btn_on"] if active else (C["btn_hover"] if hovered else C["btn"])
+            pygame.draw.rect(screen, bg, r, border_radius=7)
+            label = f"{key}:  {val}" if val else key
+            lt = fnt_body.render(label, True, C["btn_text"])
+            screen.blit(lt, lt.get_rect(center=r.center))
+            by += BTN_H + BTN_GAP
+
+        # Pie
+        footer = fnt_section.render(
+            f"Jugadas: {engine.state.ply}    Sin captura: {engine.state.no_capture_ply}",
+            True, C["muted"],
+        )
+        screen.blit(footer, footer.get_rect(centerx=mid, bottom=SCREEN_H - 6))
+        return rects
